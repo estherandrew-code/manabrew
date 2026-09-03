@@ -130,8 +130,30 @@ public final class ManaBrewEngineAdapter {
         return getSession(sessionId).getSnapshotJson(viewer);
     }
 
+    /**
+     * Forge's full game-state serialization for this session (2026-09-02) --
+     * the inverse of {@link #applyGameState}, and NOT the same thing as
+     * getSnapshot, which is a per-viewer redacted view and so cannot be
+     * restored. Lets a caller branch a game without replaying it from turn 1.
+     */
+    public String dumpGameState(final String sessionId) {
+        return getSession(sessionId).dumpGameStateJson();
+    }
+
+    public String applyGameState(final String sessionId, final String stateText) {
+        Objects.requireNonNull(stateText, "stateText");
+        return getSession(sessionId).applyGameState(stateText);
+    }
+
     public String getGameOver(final String sessionId) {
         return String.valueOf(getSession(sessionId).isGameOver());
+    }
+
+    public String predictDamage(
+            final String sessionId, final String sourceId, final String targetId,
+            final int damage, final boolean isCombat
+    ) {
+        return getSession(sessionId).predictDamage(sourceId, targetId, damage, isCombat);
     }
 
     public String endGameJson(final String sessionId) {

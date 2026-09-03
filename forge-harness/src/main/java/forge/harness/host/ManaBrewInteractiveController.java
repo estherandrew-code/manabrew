@@ -193,6 +193,16 @@ public final class ManaBrewInteractiveController extends PlayerController implem
                 undoManaSource(choice.untapCard());
                 continue;
             }
+            // applyGameState replaced the game while we were waiting, so
+            // `all` above describes a position that no longer exists. Loop to
+            // re-enumerate against the restored state and re-publish the
+            // prompt -- same shape as the UNDO case. Without this, a restored
+            // session keeps offering its pre-restore options and any answer
+            // resolves against the wrong spells (verified: a session restored
+            // to turn 6 still advertised its turn-2 option list).
+            if (choice.kind() == ManaBrewInteractiveSession.PriorityActionKind.RESTORED) {
+                continue;
+            }
             passUntilPlayer = choice.untilPlayer();
             passUntilPhase = choice.untilPhase();
             passUntilDeclaredTurn = game.getPhaseHandler().getTurn();
