@@ -18,6 +18,7 @@ import com.google.common.collect.Multimap;
 import forge.LobbyPlayer;
 import forge.ai.AiCostDecision;
 import forge.ai.ComputerUtilCombat;
+import forge.ai.ComputerUtilCost;
 import forge.ai.ComputerUtilMana;
 import forge.card.CardRules;
 import forge.card.ColorSet;
@@ -1712,18 +1713,71 @@ public final class ManaBrewInteractiveController extends PlayerController implem
         if (optionalCostValues == null || optionalCostValues.isEmpty()) {
             return new ArrayList<>();
         }
-        final List<String> labels = new ArrayList<>();
+        // Offer only optional costs this player can actually pay.
+        //
+        // GameActionUtil.getOptionalCostValues builds this list from KEYWORDS
+        // alone -- Kicker is listed because the card says "K:Kicker:R", with
+        // no affordability test anywhere. Forge's own human UI offers them
+        // all and relies on the player CANCELLING the payment afterwards,
+        // which an agent driving this protocol cannot do: the payManaCost
+        // prompt carries no cancel action. Choosing an unpayable cost is
+        // therefore a hang, and it really happened -- two overnight matches
+        // died on Orim's Thunder (Kicker {R} in a deck with no red source),
+        // 41 identical payManaCost prompts each, ~34 minutes wasted before
+        // the loop detector stepped in.
+        final List<OptionalCostValue> affordable = new ArrayList<>();
         for (final OptionalCostValue value : optionalCostValues) {
-            labels.add(value == null ? "Optional cost" : value.toString());
+            if (value != null && canAffordWithOptionalCost(chosen, value)) {
+                affordable.add(value);
+            }
         }
-        final List<Integer> chosenIndices = session.awaitModeChoice(me(), labels, 0, optionalCostValues.size(), sourceName(chosen));
+        if (affordable.isEmpty()) {
+            return new ArrayList<>();
+        }
+        final List<String> labels = new ArrayList<>();
+        for (final OptionalCostValue value : affordable) {
+            labels.add(value.toString());
+        }
+        // Framed the way Forge frames it for a human: PlayerControllerHuman
+        // .chooseOptionalCosts calls getGui().many("Choose optional costs",
+        // ...) with the host card in view and a minimum of 0. Same question,
+        // same wording, same "you may decline" -- see
+        // lblChooseOptionalCosts in res/languages/en-US.properties.
+        final List<Integer> chosenIndices = session.awaitLabeledModeChoice(
+                me(), labels, 0, affordable.size(), sourceName(chosen),
+                "Choose optional costs", sourceCardId(chosen));
         final List<OptionalCostValue> selected = new ArrayList<>();
         for (final Integer index : chosenIndices) {
-            if (index != null && index >= 0 && index < optionalCostValues.size()) {
-                selected.add(optionalCostValues.get(index));
+            if (index != null && index >= 0 && index < affordable.size()) {
+                selected.add(affordable.get(index));
             }
         }
         return selected;
+    }
+
+    /**
+     * Whether this player could pay the spell's own cost PLUS `value`, using
+     * exactly the method Forge's own AI uses for the same question (see
+     * PlayerControllerAi.chooseNumberForKeywordCost): copy the pay costs, add
+     * the optional one, and ask ComputerUtilCost about the combined
+     * SpellAbility. The copy matters -- add() mutates, and testing must not
+     * corrupt the real spell's cost.
+     *
+     * Fails OPEN, and loudly. If the check itself throws, the option is still
+     * offered: wrongly hiding a legal choice is a silent loss of ability,
+     * while wrongly offering an unpayable one is caught noisily by the loop
+     * detector. Loud beats silent.
+     */
+    private boolean canAffordWithOptionalCost(final SpellAbility sa, final OptionalCostValue value) {
+        try {
+            final Cost combined = sa.getPayCosts().copy();
+            combined.add(value.getCost());
+            return ComputerUtilCost.canPayCost(sa.copyWithDefinedCost(combined), player, sa.isTrigger());
+        } catch (RuntimeException error) {
+            System.err.println("[mana-brew] could not test affordability of optional cost "
+                    + value + " on " + sourceName(sa) + " -- offering it anyway: " + error);
+            return true;
+        }
     }
 
     @Override
