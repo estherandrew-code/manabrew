@@ -10,9 +10,11 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import forge.harness.protocol.*;
+import forge.ai.ComputerUtilCombat;
 import forge.game.Game;
 import forge.game.ability.ApiType;
 import forge.game.GameEntity;
+import forge.game.GameState;
 import forge.game.Match;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
@@ -41,8 +43,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
+import java.util.Arrays;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 public final class ManaBrewInteractiveSession {
 
@@ -59,6 +64,13 @@ public final class ManaBrewInteractiveSession {
     private volatile SpellAbility castingAbility;
     private final InteractiveSnapshotExtractor.SecretChoiceVisibility secretChoiceVisibility =
             new InteractiveSnapshotExtractor.SecretChoiceVisibility();
+    // applyGameState hands work to the game thread through `actions` and then
+    // waits here for it. Single pair of fields rather than a map because the
+    // protocol is strictly one request in flight (see the Python client's own
+    // lock in forge_harness_client._call), so there is never a second apply
+    // outstanding.
+    private volatile CountDownLatch applyStateLatch;
+    private volatile String applyStateError;
 
     ManaBrewInteractiveSession(final String sessionId) {
         this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
@@ -148,6 +160,119 @@ public final class ManaBrewInteractiveSession {
         secretChoiceVisibility.rememberPlayer(sourceCardId, viewer);
     }
 
+    /**
+     * Forge's own dev-mode/puzzle game-state serialization of this session's
+     * game -- the full, UNREDACTED state, unlike getSnapshotJson, which is a
+     * per-viewer view with hidden information removed and is therefore not
+     * restorable. Feed the result back to {@link #applyGameState}.
+     *
+     * Read straight from the calling (RPC) thread, exactly as
+     * getSnapshotJson does: callers only ask while a prompt is outstanding,
+     * which means the game thread is parked in takeAction() and is not
+     * mutating anything. A write cannot take that shortcut -- see
+     * applyGameState.
+     */
+    public String dumpGameStateJson() {
+        requireAttached();
+        // GameState.initFromGame reads the current phase unguarded and dies
+        // on a NullPointerException if there isn't one yet. There isn't, for
+        // the pre-game prompts (the opening dice roll, mulligans) -- the
+        // phase handler has no phase until the first turn actually begins.
+        // Say so, rather than surfacing "Cannot invoke PhaseType.toString()".
+        if (game.getPhaseHandler() == null || game.getPhaseHandler().getPhase() == null) {
+            throw new IllegalStateException(
+                    "cannot dump game state before the game has entered a phase "
+                    + "(still in pre-game: dice roll / mulligans) -- dump at a real "
+                    + "in-turn decision point instead");
+        }
+        final GameState state = new GameState();
+        state.initFromGame(game);
+        return state.toString();
+    }
+
+    /**
+     * Applies a previously dumped game state to this session's game.
+     *
+     * Queued onto `actions` so it executes on the GAME thread rather than the
+     * caller's: the game thread is parked in takeAction() waiting for a
+     * decision, which is the only moment the engine is quiescent enough to
+     * overwrite wholesale. Blocks until that has happened (or failed), so the
+     * caller can rely on the state being live when this returns -- an
+     * unsynchronised offer() would let the next getPrompt/getSnapshot race the
+     * apply and observe a half-written game.
+     */
+    public String applyGameState(final String stateText) {
+        requireAttached();
+        if (closed) {
+            throw new IllegalStateException("session is closed");
+        }
+        final CountDownLatch done = new CountDownLatch(1);
+        applyStateError = null;
+        applyStateLatch = done;
+        final JsonObject action = new JsonObject();
+        action.addProperty("kind", "apply_game_state");
+        action.addProperty("state", stateText);
+        actions.offer(action);
+        try {
+            if (!done.await(60, TimeUnit.SECONDS)) {
+                throw new IllegalStateException(
+                        "applyGameState timed out after 60s -- the game thread never took it "
+                        + "(is a prompt actually outstanding?)");
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("applyGameState was interrupted", interrupted);
+        }
+        final String error = applyStateError;
+        if (error != null) {
+            throw new IllegalStateException("applyGameState failed: " + error);
+        }
+        return "";
+    }
+
+    /**
+     * Runs the apply on the game thread, from inside takeAction().
+     *
+     * The thread rename is deliberate and load-bearing.
+     * GameState.applyToGame delegates to GameAction.invoke, which decides
+     * whether it is already on the game thread via ThreadUtil.isGameThread()
+     * -- and that is implemented as
+     * {@code Thread.currentThread().getName().startsWith("Game")}. This
+     * session's game thread is named "mana-brew-forge-&lt;id&gt;", so invoke()
+     * would judge it NOT the game thread and hand the work to Forge's own
+     * cached pool via invokeInGameThread(), which is a fire-and-forget
+     * execute(): the apply would then run on a different thread, concurrently
+     * with this one, with no way to know when it finished. Renaming for the
+     * duration makes invoke() run it inline, here, synchronously. Restored in
+     * a finally so nothing outside this call ever observes the changed name.
+     */
+    private void applyGameStateOnGameThread(final String stateText) {
+        final CountDownLatch done = applyStateLatch;
+        try {
+            final GameState state = new GameState();
+            // Split on either line ending -- the text makes a round trip
+            // through JSON and a Windows file system before coming back.
+            state.parse(Arrays.asList(stateText.split("\\r?\\n")));
+            final Thread self = Thread.currentThread();
+            final String originalName = self.getName();
+            self.setName("Game-" + originalName);
+            try {
+                state.applyToGame(game);
+            } finally {
+                self.setName(originalName);
+            }
+            applyStateError = null;
+        } catch (RuntimeException error) {
+            applyStateError = error.getClass().getSimpleName() + ": " + error.getMessage();
+            System.err.println("[mana-brew] applyGameState failed: " + error.getMessage());
+            error.printStackTrace(System.err);
+        } finally {
+            if (done != null) {
+                done.countDown();
+            }
+        }
+    }
+
     void beginCast(final SpellAbility sa) {
         this.castingAbility = sa;
     }
@@ -177,7 +302,13 @@ public final class ManaBrewInteractiveSession {
 
     static final String TRIGGER_ORDER_TITLE = "Order triggered abilities";
 
-    enum PriorityActionKind { ACTION, PASS, UNDO }
+    /**
+     * RESTORED is not a decision -- it means applyGameState replaced the game
+     * underneath this priority window, so the caller's enumerated action list
+     * describes a position that no longer exists and must be recomputed. See
+     * awaitPriorityAction and ManaBrewInteractiveController's priority loop.
+     */
+    enum PriorityActionKind { ACTION, PASS, UNDO, RESTORED }
 
     static final class PriorityChoice {
         private final PriorityActionKind kind;
@@ -259,10 +390,17 @@ public final class ManaBrewInteractiveSession {
         while (!closed && !game.isGameOver()) {
             final JsonObject action;
             try {
-                action = takeAction();
+                action = takeAction(true);
             } catch (InterruptedException error) {
                 Thread.currentThread().interrupt();
                 return new PriorityChoice(PriorityActionKind.PASS, null, null, null);
+            }
+            // The game was replaced under us. actionsForPrompt was enumerated
+            // from the old position, so it cannot be used to interpret an
+            // answer -- hand control back so the caller re-enumerates and
+            // re-publishes against the restored state.
+            if ("apply_game_state".equals(action.has("kind") ? action.get("kind").getAsString() : "")) {
+                return new PriorityChoice(PriorityActionKind.RESTORED, null, null, null);
             }
             try {
                 return interpretPriorityAction(action, actionsForPrompt, untappableCards);
@@ -1841,6 +1979,19 @@ public final class ManaBrewInteractiveSession {
     }
 
     private JsonObject takeAction() throws InterruptedException {
+        return takeAction(false);
+    }
+
+    /**
+     * @param returnOnRestore when true, an apply_game_state action is applied
+     *     and then RETURNED to the caller instead of being swallowed. Only
+     *     the priority path wants that: its caller enumerated the legal
+     *     actions before the restore, so it has to recompute them against the
+     *     new state rather than keep waiting with a stale list. Every other
+     *     prompt path passes false and keeps the original behaviour (apply,
+     *     then go on waiting for the real answer).
+     */
+    private JsonObject takeAction(final boolean returnOnRestore) throws InterruptedException {
         while (true) {
             if (bridge != null && actions.isEmpty() && !closed && !game.isGameOver()) {
                 submitAction(bridge.exchange(promptedPlayerIndex, latestPromptJson));
@@ -1853,6 +2004,18 @@ public final class ManaBrewInteractiveSession {
                 continue;
             }
             final String kind = action.has("kind") ? action.get("kind").getAsString() : "";
+            // Not a decision: overwrite the game and keep waiting for the real
+            // answer to the prompt that is still outstanding. Same shape as
+            // the concede handling below -- a side effect on the game thread,
+            // then continue.
+            if ("apply_game_state".equals(kind)) {
+                applyGameStateOnGameThread(
+                        action.has("state") ? action.get("state").getAsString() : "");
+                if (returnOnRestore) {
+                    return action;
+                }
+                continue;
+            }
             if (!"concede".equals(kind)) {
                 return action;
             }
@@ -2573,6 +2736,63 @@ public final class ManaBrewInteractiveSession {
             }
         }
         return null;
+    }
+
+    /**
+     * On-demand predictDamage tool (2026-08-30, per Andrew): resolves a
+     * source card and a target (player or card) by their published ids,
+     * from ANYWHERE in the game (not just current combat participants --
+     * see findAnyEntityByPublishedId), and asks Forge's own
+     * ComputerUtilCombat.predictDamageTo how much of `damage` would actually
+     * land, accounting for prevention/replacement effects. Distinct from
+     * the always-on attackerDamagePreview in the snapshot: this is an
+     * explicit, hypothetical query an agent can make about ANY source/
+     * target/amount, not just a real attacker's own power against its
+     * actual target.
+     */
+    String predictDamage(final String sourceId, final String targetId, final int damage, final boolean isCombat) {
+        final Card source = findAnyCardByPublishedId(sourceId);
+        final GameEntity target = findAnyEntityByPublishedId(targetId);
+        final JsonObject result = new JsonObject();
+        if (source == null) {
+            result.addProperty("error", "unknown sourceId: " + sourceId);
+            return result.toString();
+        }
+        if (target == null) {
+            result.addProperty("error", "unknown targetId: " + targetId);
+            return result.toString();
+        }
+        try {
+            result.addProperty("predictedDamage", ComputerUtilCombat.predictDamageTo(target, damage, source, isCombat));
+        } catch (final RuntimeException e) {
+            result.addProperty("error", "prediction failed: " + e.getMessage());
+        }
+        return result.toString();
+    }
+
+    private Card findAnyCardByPublishedId(final String cardId) {
+        for (final Player p : game.getRegisteredPlayers()) {
+            final Card found = findCardByPublishedId(new ArrayList<>(p.getCardsIn(ZoneType.Battlefield)), cardId);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    private GameEntity findAnyEntityByPublishedId(final String id) {
+        if (id.startsWith("player-")) {
+            try {
+                final int idx = Integer.parseInt(id.substring("player-".length()));
+                final List<Player> players = game.getRegisteredPlayers();
+                if (idx >= 0 && idx < players.size()) {
+                    return players.get(idx);
+                }
+            } catch (final NumberFormatException ignored) {
+                // not a player id after all -- fall through to card lookup
+            }
+        }
+        return findAnyCardByPublishedId(id);
     }
 
     private static Card findCardByPublishedId(final List<Card> cards, final String cardId) {

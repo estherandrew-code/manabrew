@@ -1,6 +1,7 @@
 package forge.harness.host;
 
 import forge.harness.common.ParityCardMap;
+import forge.harness.common.CombatChoiceSpace;
 import forge.harness.common.SnapshotExtractor;
 import forge.harness.protocol.CardChoiceDto;
 import forge.harness.protocol.CardChoiceDto_chosenCard;
@@ -203,6 +204,7 @@ public final class InteractiveSnapshotExtractor {
         view.put("turn", base.get("turn"));
         view.put("step", normalizeStep((String) base.get("phase")));
         view.put("combatAssignments", snapshotCombat(game));
+        view.put("attackerDamagePreview", snapshotAttackerDamagePreview(game));
         view.put("activePlayerId", activePlayerId);
         view.put("priorityPlayerId", "player-" + asIndex(base.get("priority_player")));
         view.put("players", players);
@@ -1012,6 +1014,82 @@ public final class InteractiveSnapshotExtractor {
             }
         }
         return out;
+    }
+
+    /**
+     * Always-on damage preview (2026-08-30, per Andrew: "I want the
+     * damageIfUnblocked always called for each attacker and added to the
+     * choice information when attacking... a similar call... on blocking").
+     * Uses Forge's OWN AI combat-math (ComputerUtilCombat.damageIfUnblocked
+     * -- the exact evaluation Forge's built-in AI already relies on, not a
+     * reimplementation) to answer "how much damage would this creature deal
+     * if it went unblocked", without committing to anything:
+     *   - Before attackers are declared (Declare Attackers Step): evaluated
+     *     for every LEGAL attacker against every legal target
+     *     (CombatChoiceSpace, the same candidate set the real chooseAttackers
+     *     prompt offers).
+     *   - After attackers are declared (Declare Blockers Step onward): each
+     *     attacker's real Combat already fixes its one actual target, so
+     *     there's exactly one entry -- the number a defender needs to decide
+     *     whether blocking is worth it.
+     * Wrapped in a try/catch per attacker (mirrors this file's existing
+     * wouldDieInCombat handling above): combat-math can throw on unusual
+     * static abilities, and one attacker's evaluation failing shouldn't blank
+     * out the whole snapshot.
+     */
+    private static List<Map<String, Object>> snapshotAttackerDamagePreview(final Game game) {
+        final List<Map<String, Object>> out = new ArrayList<>();
+        final Combat combat = game.getCombat();
+        if (combat == null) {
+            return out;
+        }
+        final boolean attackersDeclared = !combat.getAttackers().isEmpty();
+        final List<Card> attackers = new ArrayList<>();
+        if (attackersDeclared) {
+            attackers.addAll(combat.getAttackers());
+        } else {
+            final Player turnPlayer = game.getPhaseHandler().getPlayerTurn();
+            if (turnPlayer != null) {
+                attackers.addAll(CombatChoiceSpace.legalAttackers(turnPlayer, combat));
+            }
+        }
+        for (final Card attacker : attackers) {
+            final List<GameEntity> targets;
+            if (attackersDeclared) {
+                final GameEntity defender = combat.getDefenderByAttacker(attacker);
+                targets = defender == null
+                        ? java.util.Collections.<GameEntity>emptyList()
+                        : java.util.Collections.singletonList(defender);
+            } else {
+                targets = CombatChoiceSpace.legalDefendersForAttacker(attacker, combat);
+            }
+            final List<Map<String, Object>> byTarget = new ArrayList<>();
+            for (final GameEntity target : targets) {
+                final Map<String, Object> t = new LinkedHashMap<>();
+                t.put("targetId", entityId(game, target));
+                try {
+                    t.put("damageIfUnblocked", ComputerUtilCombat.damageIfUnblocked(attacker, target, combat, false));
+                } catch (final RuntimeException ignored) {
+                    t.put("damageIfUnblocked", null);
+                }
+                byTarget.add(t);
+            }
+            final Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("attackerId", SnapshotExtractor.javaCardId(attacker));
+            entry.put("damageByTarget", byTarget);
+            out.add(entry);
+        }
+        return out;
+    }
+
+    private static String entityId(final Game game, final GameEntity entity) {
+        if (entity instanceof Player) {
+            return "player-" + SnapshotExtractor.playerIndex(game, (Player) entity);
+        }
+        if (entity instanceof Card) {
+            return SnapshotExtractor.javaCardId((Card) entity);
+        }
+        return String.valueOf(entity);
     }
 
     private static List<Map<String, Object>> snapshotStack(

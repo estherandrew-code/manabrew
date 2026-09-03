@@ -295,6 +295,10 @@ public final class Main {
      * Request shape:  {"command":"startGame","payload":"<json>"}  (sessionId
      * goes in `sessionId`; payload is the inner JSON string).
      * Response shape: {"ok":true,"result":"<json|bool|empty>"} or {"ok":false,"error":"..."}.
+     *
+     * Commands: quit, reset, startGame, submitAction, getPrompt, getSnapshot,
+     * getGameOver, dumpGameState, applyGameState, predictDamage, endGame,
+     * abortGame.
      */
     private static void runInteractiveServerMode(String assetsDir) {
         System.err.println("[harness] Interactive server mode ready.");
@@ -358,6 +362,33 @@ public final class Main {
                             break;
                         case "getGameOver":
                             sendOk(adapter.getGameOver(requireString(request, "sessionId")));
+                            break;
+                        case "dumpGameState":
+                            // Forge's own dev-mode/puzzle state serialization
+                            // (2026-09-02) -- unlike getSnapshot this is the
+                            // full unredacted state and can be fed back via
+                            // applyGameState, so a caller can branch a game
+                            // instead of replaying it from turn 1.
+                            sendOk(adapter.dumpGameState(requireString(request, "sessionId")));
+                            break;
+                        case "applyGameState":
+                            sendOk(adapter.applyGameState(
+                                requireString(request, "sessionId"),
+                                requireString(request, "payload")));
+                            break;
+                        case "predictDamage":
+                            // On-demand (2026-08-30, per Andrew): unlike attackerDamagePreview
+                            // in the snapshot (always computed for actual attackers), this lets
+                            // an agent ask Forge's own ComputerUtilCombat.predictDamageTo about
+                            // ANY hypothetical source/target/amount -- e.g. a burn spell, or a
+                            // creature's power against a target with prevention/replacement
+                            // effects -- without it being computed unconditionally every turn.
+                            sendOk(adapter.predictDamage(
+                                requireString(request, "sessionId"),
+                                requireString(request, "sourceId"),
+                                requireString(request, "targetId"),
+                                request.get("damage").getAsInt(),
+                                request.has("isCombat") && request.get("isCombat").getAsBoolean()));
                             break;
                         case "endGame":
                             sendOk(adapter.endGameJson(requireString(request, "sessionId")));
