@@ -1144,6 +1144,29 @@ public final class ManaBrewInteractiveSession {
         return awaitModeChoice(playerId, unweightedOptions(options), min, max, sourceName, null, null);
     }
 
+    /**
+     * Same as awaitModeChoice, but carries the human-facing framing --
+     * `description` (the question being asked, e.g. Forge's own "Choose
+     * optional costs") and the source card's id, so the agent sees WHAT it is
+     * deciding rather than a bare list of labels.
+     *
+     * A separately named method rather than an overload: erasure makes
+     * List&lt;String&gt; and List&lt;SelectionOption&gt; the same signature at
+     * this arity, so the two cannot coexist as awaitModeChoice.
+     */
+    List<Integer> awaitLabeledModeChoice(
+            final int playerId,
+            final List<String> options,
+            final int min,
+            final int max,
+            final String sourceName,
+            final String description,
+            final String sourceCardId
+    ) {
+        return awaitModeChoice(
+                playerId, unweightedOptions(options), min, max, sourceName, description, sourceCardId);
+    }
+
     List<Integer> awaitModeChoice(
             final int playerId,
             final List<String> options,
