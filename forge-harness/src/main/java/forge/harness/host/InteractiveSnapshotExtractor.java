@@ -984,9 +984,41 @@ public final class InteractiveSnapshotExtractor {
     private static List<String> keywords(final Card card) {
         final List<String> out = new ArrayList<>();
         for (final KeywordInterface keyword : card.getKeywords()) {
-            out.add(keyword.getOriginal());
+            out.add(keywordText(keyword));
         }
         return out;
+    }
+
+    /**
+     * Player-facing text for one keyword.
+     *
+     * <p>getOriginal() (and toString(), which returns it) give Forge's
+     * internal script form -- "Equip:3:Creature.YouCtrl+Legendary:legendary
+     * creature", "Protection:Dog". getTitle() is Forge's own display
+     * rendering, overridden per keyword family: "Equip {3}", "Protection
+     * from Dog", "Ward 2", "Flying". The second parameter of a scripted
+     * keyword is a machine predicate that is never shown to players; the
+     * prose beside it is what card scripts carry for display, and
+     * getTitle() is what assembles it.
+     *
+     * <p>getReminderText() is not used here: it is a whole sentence per
+     * keyword and CardDto.text already carries the oracle text.
+     *
+     * <p>Falls back to getOriginal() rather than propagating: getTitle() on
+     * a cost-bearing keyword reaches getCost(), which for a "ManaCost" cost
+     * string dereferences getHostCard(), and this extractor runs for every
+     * decision in a match. A cosmetic failure must not end a game.
+     */
+    private static String keywordText(final KeywordInterface keyword) {
+        try {
+            final String title = keyword.getTitle();
+            if (title != null && !title.trim().isEmpty()) {
+                return title.trim();
+            }
+        } catch (final RuntimeException ignored) {
+            // fall through to the raw form
+        }
+        return keyword.getOriginal();
     }
 
     private static Map<String, Integer> counterMap(final Card card) {
