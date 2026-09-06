@@ -201,6 +201,31 @@ public final class ManaBrewInteractiveSession {
      * unsynchronised offer() would let the next getPrompt/getSnapshot race the
      * apply and observe a half-written game.
      */
+    /**
+     * How long to wait for the game thread to pick up an apply.
+     *
+     * A successful apply takes ~0.1s (measured against a real restored
+     * turn-8 board), because the work is handed over the moment the game
+     * thread parks for a decision. If no prompt is outstanding it will never
+     * be taken at all, so a long wait buys nothing and costs a minute per
+     * failure. Override with -Dmanabrew.applyGameState.timeoutMs=... .
+     */
+    private static long applyStateTimeoutMs() {
+        final String raw = System.getProperty("manabrew.applyGameState.timeoutMs");
+        if (raw != null && !raw.trim().isEmpty()) {
+            try {
+                final long parsed = Long.parseLong(raw.trim());
+                if (parsed > 0) {
+                    return parsed;
+                }
+            } catch (NumberFormatException ignored) {
+                // fall through to the default rather than failing a restore
+                // over a malformed property
+            }
+        }
+        return 5000L;
+    }
+
     public String applyGameState(final String stateText) {
         requireAttached();
         if (closed) {
@@ -214,10 +239,22 @@ public final class ManaBrewInteractiveSession {
         action.addProperty("state", stateText);
         actions.offer(action);
         try {
-            if (!done.await(60, TimeUnit.SECONDS)) {
+            if (!done.await(applyStateTimeoutMs(), TimeUnit.MILLISECONDS)) {
+                // Take the work back off the queue. It is only picked up by
+                // the game thread when that thread parks for a decision, so
+                // an abandoned action would otherwise be applied at some
+                // arbitrary later moment and overwrite a game nobody asked
+                // to overwrite. At the old 60s that was unlikely; at 5s it
+                // is the normal case.
+                final boolean withdrawn = actions.remove(action);
+                applyStateLatch = null;
                 throw new IllegalStateException(
-                        "applyGameState timed out after 60s -- the game thread never took it "
-                        + "(is a prompt actually outstanding?)");
+                        "applyGameState timed out after " + applyStateTimeoutMs() + "ms -- the game "
+                        + "thread never took it (is a prompt actually outstanding?)"
+                        + (withdrawn
+                           ? " -- the queued apply was withdrawn, this session is unchanged"
+                           : " -- the apply was ALREADY taken and may still land, so this session"
+                             + " must not be reused"));
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
