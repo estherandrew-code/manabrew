@@ -69,6 +69,24 @@ public final class ManaBrewInteractiveSession {
     // protocol is strictly one request in flight (see the Python client's own
     // lock in forge_harness_client._call), so there is never a second apply
     // outstanding.
+    /**
+     * True while applyToGame is running on the game thread.
+     *
+     * Restoring a state moves cards between zones, and Forge runs the
+     * ordinary replacement and trigger machinery while it does. If any of
+     * that asks the player a question, the game thread publishes a prompt
+     * and waits -- but applyGameState runs ON that thread, and the RPC
+     * caller is blocked on a latch only the end of this call counts down.
+     * The one consumer that could answer is the thread doing the asking.
+     * A thread dump of a real hang showed exactly that: moveTo ->
+     * ReplacementHandler -> handleUnlessCost -> payCostToPreventEffect ->
+     * awaitBooleanChoice, parked until the 5s watchdog fired.
+     *
+     * While this is set, prompts answer themselves with the option that
+     * changes nothing.
+     */
+    private volatile boolean restoringState;
+
     private volatile CountDownLatch applyStateLatch;
     private volatile String applyStateError;
 
@@ -293,9 +311,11 @@ public final class ManaBrewInteractiveSession {
             final Thread self = Thread.currentThread();
             final String originalName = self.getName();
             self.setName("Game-" + originalName);
+            restoringState = true;
             try {
                 state.applyToGame(game);
             } finally {
+                restoringState = false;
                 self.setName(originalName);
             }
             applyStateError = null;
@@ -2053,6 +2073,19 @@ public final class ManaBrewInteractiveSession {
      */
     private JsonObject takeAction(final boolean returnOnRestore) throws InterruptedException {
         while (true) {
+            // A restore runs on THIS thread, so an answer can never arrive:
+            // the only consumer that could send one is the thread now
+            // waiting for it. Every caller already handles "no answer" with
+            // the option that changes nothing, which is also the correct
+            // answer during a restore -- the state being applied already
+            // encodes the outcome the prompt is asking about.
+            //
+            // Measured twice before this was made general: a replacement
+            // with an unless-cost blocked in awaitBooleanChoice, and two
+            // competing replacements blocked in awaitModeChoice.
+            if (restoringState) {
+                return returnOnRestore ? null : syntheticPass();
+            }
             if (bridge != null && actions.isEmpty() && !closed && !game.isGameOver()) {
                 submitAction(bridge.exchange(promptedPlayerIndex, latestPromptJson));
             }
