@@ -320,6 +320,19 @@ pub struct CardDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub attached_to: Option<String>,
+    // The card that exiled this one (Forge's Card.getExiledWith), for a
+    // card sitting in exile because another card put it there: a hideaway
+    // land's hidden card, an Adventure's exiled half, the card under a
+    // Food or Clue. Without it an exiled card is opaque -- a client can
+    // see the card but has no way to say what it belongs to, or that it
+    // can still be played through its host.
+    //
+    // Shaped exactly like attached_to (an optional card id, omitted when
+    // absent) so every consumer that already resolves an id to a name
+    // renders it with no new code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exiled_with_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_ids: Vec<String>,
     // Mutate pile: the card ids merged under this top card.

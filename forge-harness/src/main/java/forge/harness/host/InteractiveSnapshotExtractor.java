@@ -728,6 +728,19 @@ public final class InteractiveSnapshotExtractor {
         if (attachedTo != null) {
             dto.attachedTo = SnapshotExtractor.javaCardId(attachedTo);
         }
+        // What put this card in exile, where another card did: a hideaway
+        // land's hidden card, an Adventure's exiled half, the card under a
+        // Food or Clue. Forge has tracked it all along; it simply was not
+        // on the wire, so an exiled card reached a client with no way to
+        // say what it belonged to or how it could still be played.
+        //
+        // Serialised exactly like attachedTo -- an optional card id -- so
+        // every consumer that already turns an id into a card name renders
+        // it with no new code.
+        final Card exiledWith = card.getExiledWith();
+        if (exiledWith != null) {
+            dto.exiledWithId = SnapshotExtractor.javaCardId(exiledWith);
+        }
         final List<String> attachmentIds = new ArrayList<>();
         for (final Card attachment : card.getAttachedCards()) {
             attachmentIds.add(SnapshotExtractor.javaCardId(attachment));
