@@ -1011,6 +1011,34 @@ fn end_game_without_humans(
     let _ = outbound_tx.send(ClientMessage::EndGame { game_id });
 }
 
+/// Which agent the bots this node spawns should use.
+///
+/// Env-selected like every other knob here, and defaulting to the built-in
+/// AI so an existing deployment behaves exactly as before. `llm` routes
+/// every decision to the MTG-LLM-Pilot arbiter -- see manabot::agent::llm,
+/// which takes the arbiter's address from MANABOT_ARBITER_URL.
+///
+/// This only has an effect while SELF_HOSTED_NODE_FORGE_AI is off (its
+/// default): with it on, Forge plays the bot seats internally and the bot
+/// client is never asked for a decision at all.
+fn bot_agent_kind() -> AgentKind {
+    match std::env::var("SELF_HOSTED_NODE_BOT_AGENT")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "llm" => AgentKind::Llm,
+        "" | "simple" => AgentKind::Simple,
+        other => {
+            warn!(
+                agent = other,
+                "unknown SELF_HOSTED_NODE_BOT_AGENT; using the built-in AI"
+            );
+            AgentKind::Simple
+        }
+    }
+}
+
 fn spawn_bots(config: &Config, decks: &[DeckSelection], room_id: &str, bot_state: &SharedBotState) {
     stop_bots(bot_state);
     let mut guard = match bot_state.lock() {
@@ -1036,7 +1064,7 @@ fn spawn_bots(config: &Config, decks: &[DeckSelection], room_id: &str, bot_state
             deck_name: deck.name.clone(),
             deck: deck.deck.clone(),
             commander_name: deck.commander_name.clone(),
-            agent: AgentKind::Simple,
+            agent: bot_agent_kind(),
             answer_delay_ms: None,
         };
         let shutdown = Arc::new(tokio::sync::Notify::new());

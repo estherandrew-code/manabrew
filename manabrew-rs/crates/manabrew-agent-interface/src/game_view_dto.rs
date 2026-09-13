@@ -729,6 +729,10 @@ fn card_to_dto_for_viewer(game: &GameState, cid: CardId, viewer: Option<PlayerId
         is_face_down: card.face_down,
         is_bestowed: card.is_bestowed,
         attached_to: card.attached_to.map(card_id_str),
+        // The card whose effect exiled this one -- the exile-zone twin of
+        // attached_to, and rendered the same way, so a view can say which
+        // permanent is holding a card rather than only that it is exiled.
+        exiled_with_id: card.exiled_by.map(card_id_str),
         attachment_ids: card
             .attachments
             .iter()

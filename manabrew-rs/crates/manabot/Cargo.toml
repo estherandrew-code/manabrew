@@ -7,7 +7,7 @@ description = "AI bot player for the manabrew engine"
 
 [features]
 default = ["native"]
-native = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
+native = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:ureq"]
 
 [dependencies]
 manabrew-agent-interface = { path = "../manabrew-agent-interface", version = "0.13.1" }
@@ -21,6 +21,10 @@ futures-util = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["rt", "macros", "net", "sync", "time"], optional = true }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"], optional = true }
 tracing = "0.1"
+# Blocking HTTP, native only: the LLM agent calls the arbiter from
+# BotAgent::decide, which is synchronous. See agent/llm.rs for why that is
+# acceptable here and what it costs.
+ureq = { version = "2", features = ["json"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

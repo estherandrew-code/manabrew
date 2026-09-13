@@ -12,7 +12,13 @@ use manabrew_agent_interface::prompt::{
 };
 use serde::{Deserialize, Serialize};
 
+// Native only: it reaches the arbiter over blocking HTTP, which the
+// wasm build of this crate has no way to do.
+#[cfg(feature = "native")]
+pub mod llm;
 pub mod simple_ai;
+#[cfg(feature = "native")]
+pub use llm::LlmAgent;
 pub use simple_ai::SimpleAi;
 
 pub trait BotAgent: Send {
@@ -26,12 +32,23 @@ pub trait BotAgent: Send {
 pub enum AgentKind {
     #[default]
     Simple,
+    /// Every decision is asked of the MTG-LLM-Pilot arbiter over HTTP.
+    /// See agent::llm -- the address comes from MANABOT_ARBITER_URL,
+    /// because the model runs on a different machine from the game.
+    ///
+    /// Native only, like the agent behind it. A wasm build cannot reach
+    /// the arbiter, and quietly seating the built-in AI instead would
+    /// play a different opponent than the one that was asked for.
+    #[cfg(feature = "native")]
+    Llm,
 }
 
 impl AgentKind {
     pub fn build(self) -> Box<dyn BotAgent + Send> {
         match self {
             AgentKind::Simple => Box::<SimpleAi>::default(),
+            #[cfg(feature = "native")]
+            AgentKind::Llm => Box::<LlmAgent>::default(),
         }
     }
 }
