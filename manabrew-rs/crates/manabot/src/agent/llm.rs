@@ -111,14 +111,59 @@ impl BotAgent for LlmAgent {
         });
 
         let endpoint = format!("{}/decide", self.url.trim_end_matches('/'));
-        let response = ureq::post(&endpoint)
-            .timeout(REQUEST_TIMEOUT)
-            .send_json(body);
+
+        // Try more than once. Returning None on the first failure stalls
+        // this seat for the REST OF THE GAME -- BotState drops the prompt
+        // and nothing asks again -- so a single transient error is fatal in
+        // a way it has no need to be. Found in the first human-vs-model
+        // game: one 400 on the opening decision, and the bot never moved
+        // again while the arbiter sat healthy beside it.
+        //
+        // Three attempts with a short pause. The arbiter's own retry budget
+        // handles a model that answers badly; this handles the arbiter
+        // being briefly absent -- restarted, redeployed, not yet up.
+        let mut response = None;
+        for attempt in 1..=3u32 {
+            match ureq::post(&endpoint)
+                .timeout(REQUEST_TIMEOUT)
+                .send_json(body.clone())
+            {
+                Ok(ok) => {
+                    response = Some(Ok(ok));
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "llm-bot",
+                        "arbiter call failed (attempt {attempt}/3): {error}");
+                    response = Some(Err(error));
+                    if attempt < 3 {
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+        let response = match response {
+            Some(r) => r,
+            None => return None,
+        };
 
         match response {
             Ok(resp) => match resp.into_json::<Value>() {
                 Ok(value) => match serde_json::from_value::<PromptOutput>(
-                    value.get("output").cloned().unwrap_or(Value::Null),
+                    // "payload", not "output". PromptOutput is
+                    // #[serde(tag = "type", content = "output")], so it
+                    // needs the WHOLE tagged object -- {"type":"mulligan",
+                    // "output":{"keep":true}} -- and the service's "output"
+                    // field is only the inner half, with the tag stripped.
+                    // Deserialising that always failed, decide returned
+                    // None, and the seat stalled for the rest of the game:
+                    // one 200 from the arbiter and then silence. Found in
+                    // the first human-vs-model game.
+                    value
+                        .get("payload")
+                        .or_else(|| value.get("output"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
                 ) {
                     Ok(output) => Some(output),
                     Err(error) => {
