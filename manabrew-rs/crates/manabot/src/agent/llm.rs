@@ -129,6 +129,15 @@ impl BotAgent for LlmAgent {
                 .send_json(body.clone())
             {
                 Ok(ok) => {
+                    // 204 means the arbiter understood and has nothing to
+                    // send: the prompt wanted no answer. gameOver is the
+                    // case -- PromptOutput has no GameOver variant at all,
+                    // and SimpleAi answers it with None too. Returning here
+                    // rather than falling through to the JSON parse keeps it
+                    // out of the error log; it is not a failed decision.
+                    if ok.status() == 204 {
+                        return None;
+                    }
                     response = Some(Ok(ok));
                     break;
                 }
